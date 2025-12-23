@@ -1,0 +1,577 @@
+import { useState, useEffect } from "react";
+import { trpc } from "@/lib/trpc";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { 
+  Mic, 
+  Users, 
+  Wand2, 
+  Volume2,
+  User,
+  Baby,
+  UserCircle,
+  Loader2,
+  Check,
+  X,
+  Save,
+  Trash2,
+  Play,
+  Square
+} from "lucide-react";
+import { toast } from "sonner";
+
+// 配音模式類型
+export type VoiceMode = "unified" | "perScene" | "character";
+
+// 語言類型
+export type VoiceLanguage = "cantonese" | "mandarin" | "english" | "clone";
+
+// 配音員類型
+export interface VoiceActor {
+  id: string;
+  name: string;
+  gender: "male" | "female";
+  type: "narrator" | "character";
+  language: VoiceLanguage;
+  voice: string;
+  description: string;
+  sampleText?: string;
+  ageGroup?: string;
+  style?: string[];
+  useCases?: string[];
+  tags?: string[];
+  sampleUrl?: string;
+  kreadoVoiceId?: string;
+  kreadoVoiceSource?: number;
+}
+
+// 角色聲音配置
+export interface CharacterVoiceConfig {
+  characterName: string;
+  characterDescription?: string;
+  voiceActorId: string;
+  isAutoMatched?: boolean;
+}
+
+interface VoiceSelectorProps {
+  voiceMode: VoiceMode;
+  onVoiceModeChange: (mode: VoiceMode) => void;
+  selectedVoiceActor?: string;
+  onVoiceActorChange: (voiceActorId: string) => void;
+  characterVoices?: CharacterVoiceConfig[];
+  onCharacterVoicesChange?: (voices: CharacterVoiceConfig[]) => void;
+  story?: string;
+  storyMode?: "character" | "scene";
+  language?: VoiceLanguage;
+}
+
+// 配音模式配置
+const VOICE_MODES = {
+  unified: {
+    name: "統一配音",
+    description: "所有場景使用同一個配音員",
+    icon: Mic,
+    features: ["簡單快速", "風格統一", "適合旁白敘事"],
+  },
+  perScene: {
+    name: "場景配音",
+    description: "每個場景可選擇不同配音員",
+    icon: Volume2,
+    features: ["靈活多變", "場景區分", "適合多元內容"],
+  },
+  character: {
+    name: "角色配音",
+    description: "根據角色自動分配不同配音員",
+    icon: Users,
+    features: ["角色區分", "AI 自動配對", "適合對話故事"],
+  },
+};
+
+export function VoiceSelector({
+  voiceMode,
+  onVoiceModeChange,
+  selectedVoiceActor,
+  onVoiceActorChange,
+  characterVoices = [],
+  onCharacterVoicesChange,
+  story,
+  storyMode,
+  language = "cantonese",
+}: VoiceSelectorProps) {
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isPlaying, setIsPlaying] = useState<string | null>(null);
+  const [audioElement, setAudioElement] = useState<HTMLAudioElement | null>(null);
+  
+  // 篩選狀態
+  const [genderFilter, setGenderFilter] = useState<"all" | "male" | "female">("all");
+  const [typeFilter, setTypeFilter] = useState<"all" | "narrator" | "character">("all");
+
+  // 試聽配音員聲音
+  const handlePlaySample = (actor: VoiceActor, e: React.MouseEvent) => {
+    e.stopPropagation(); // 阻止觸發卡片點擊
+    
+    if (!actor.sampleUrl) {
+      toast.error("此配音員沒有試聽樣本");
+      return;
+    }
+
+    // 如果正在播放同一個，則停止
+    if (isPlaying === actor.id && audioElement) {
+      audioElement.pause();
+      audioElement.currentTime = 0;
+      setIsPlaying(null);
+      setAudioElement(null);
+      return;
+    }
+
+    // 停止之前的播放
+    if (audioElement) {
+      audioElement.pause();
+      audioElement.currentTime = 0;
+    }
+
+    // 播放新的音頻
+    const audio = new Audio(actor.sampleUrl);
+    audio.onended = () => {
+      setIsPlaying(null);
+      setAudioElement(null);
+    };
+    audio.onerror = () => {
+      toast.error("播放失敗，請稍後再試");
+      setIsPlaying(null);
+      setAudioElement(null);
+    };
+    audio.play();
+    setIsPlaying(actor.id);
+    setAudioElement(audio);
+  };
+  const [analyzedCharacters, setAnalyzedCharacters] = useState<Array<{
+    name: string;
+    description: string;
+    gender?: string;
+  }>>([]); 
+
+  // 獲取所有配音員
+  const { data: voiceData } = trpc.voice.getAll.useQuery();
+  const allVoiceActors = voiceData?.voiceActors || [];
+  
+  // 調試日志
+  console.log('[VoiceSelector] language prop:', language);
+  console.log('[VoiceSelector] allVoiceActors count:', allVoiceActors.length);
+  
+  // 根據語言篩選配音員
+  const voiceActors = allVoiceActors.filter(
+    (actor: VoiceActor) => {
+      return actor.language === language;
+    }
+  );
+  
+  console.log('[VoiceSelector] filtered voiceActors count:', voiceActors.length);
+
+  // 根據篩選條件過濾配音員
+  const filteredVoiceActors = voiceActors.filter((actor: VoiceActor) => {
+    if (genderFilter !== "all" && actor.gender !== genderFilter) return false;
+    if (typeFilter !== "all" && actor.type !== typeFilter) return false;
+    return true;
+  });
+
+  // 分析角色 mutation
+  const analyzeCharacters = trpc.voice.analyzeCharacters.useMutation({
+    onSuccess: (data) => {
+      setAnalyzedCharacters(data);
+      setIsAnalyzing(false);
+      toast.success(`分析完成，發現 ${data.length} 個角色`);
+    },
+    onError: (error) => {
+      setIsAnalyzing(false);
+      toast.error("角色分析失敗: " + error.message);
+    },
+  });
+
+  // 自動分配配音員 mutation
+  const autoAssign = trpc.voice.autoAssign.useMutation({
+    onSuccess: (data) => {
+      onCharacterVoicesChange?.(data);
+      toast.success("配音員自動分配完成");
+    },
+    onError: (error) => {
+      toast.error("自動分配失敗: " + error.message);
+    },
+  });
+
+  // 保存角色聲音綁定
+  const saveCharacterVoice = trpc.voice.saveCharacterVoice.useMutation({
+    onSuccess: () => {
+      toast.success("角色聲音綁定已保存");
+    },
+  });
+
+  // 獲取用戶的角色聲音綁定
+  const { data: savedVoices, refetch: refetchSavedVoices } = trpc.voice.getCharacterVoices.useQuery();
+
+  // 刪除角色聲音綁定
+  const deleteCharacterVoice = trpc.voice.deleteCharacterVoice.useMutation({
+    onSuccess: () => {
+      refetchSavedVoices();
+      toast.success("綁定已刪除");
+    },
+  });
+
+  // 分析故事中的角色
+  const handleAnalyzeCharacters = () => {
+    if (!story) {
+      toast.error("請先輸入故事內容");
+      return;
+    }
+    setIsAnalyzing(true);
+    analyzeCharacters.mutate({ story });
+  };
+
+  // 自動分配配音員
+  const handleAutoAssign = () => {
+    if (analyzedCharacters.length === 0) {
+      toast.error("請先分析角色");
+      return;
+    }
+    autoAssign.mutate({
+      characters: analyzedCharacters.map(c => ({
+        name: c.name,
+        description: c.description,
+      })),
+    });
+  };
+
+  // 更新角色的配音員
+  const updateCharacterVoice = (characterName: string, voiceActorId: string) => {
+    const newVoices = [...characterVoices];
+    const index = newVoices.findIndex(v => v.characterName === characterName);
+    if (index >= 0) {
+      newVoices[index] = { ...newVoices[index], voiceActorId, isAutoMatched: false };
+    } else {
+      newVoices.push({ characterName, voiceActorId, isAutoMatched: false });
+    }
+    onCharacterVoicesChange?.(newVoices);
+  };
+
+  // 保存角色聲音綁定到數據庫
+  const handleSaveBinding = (config: CharacterVoiceConfig) => {
+    saveCharacterVoice.mutate({
+      characterName: config.characterName,
+      characterDescription: config.characterDescription,
+      voiceActorId: config.voiceActorId,
+      isAutoMatched: config.isAutoMatched,
+    });
+  };
+
+  // 獲取配音員圖標
+  const getVoiceActorIcon = (actor: VoiceActor) => {
+    if (actor.type === "narrator") return Mic;
+    if (actor.id.includes("child")) return Baby;
+    if (actor.id.includes("elderly")) return UserCircle;
+    return User;
+  };
+
+  return (
+    <Card className="glass">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Mic className="w-5 h-5 text-primary" />
+          配音設定
+        </CardTitle>
+        <CardDescription>
+          選擇配音模式和配音員，讓您的視頻更生動
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-6">
+        {/* 配音模式選擇 */}
+        <div className="space-y-3">
+          <Label>配音模式</Label>
+          <div className="grid sm:grid-cols-3 gap-3">
+            {(Object.entries(VOICE_MODES) as [VoiceMode, typeof VOICE_MODES.unified][]).map(([key, mode]) => {
+              const isSelected = voiceMode === key;
+              const ModeIcon = mode.icon;
+              return (
+                <Card 
+                  key={key}
+                  className={`cursor-pointer transition-all duration-300 ${
+                    isSelected 
+                      ? "border-primary border-2 bg-primary/5" 
+                      : "border-border hover:border-muted-foreground/50"
+                  }`}
+                  onClick={() => onVoiceModeChange(key)}
+                >
+                  <CardContent className="p-3">
+                    <div className="flex items-center gap-2 mb-2">
+                      <ModeIcon className={`w-4 h-4 ${isSelected ? "text-primary" : "text-muted-foreground"}`} />
+                      <span className="font-medium text-sm">{mode.name}</span>
+                    </div>
+                    <p className="text-xs text-muted-foreground">{mode.description}</p>
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 統一配音模式 - 選擇配音員 */}
+        {voiceMode === "unified" && (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <Label>選擇配音員（{language === "cantonese" ? "粵語" : language === "mandarin" ? "普通話" : language === "clone" ? "克隆聲音" : "English"}）</Label>
+              {/* 篩選按鈕 */}
+              <div className="flex gap-2">
+                <Select
+                  value={genderFilter}
+                  onValueChange={(v) => setGenderFilter(v as "all" | "male" | "female")}
+                >
+                  <SelectTrigger className="w-[80px] h-8 text-xs">
+                    <SelectValue placeholder="性別" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">全部</SelectItem>
+                    <SelectItem value="male">男聲</SelectItem>
+                    <SelectItem value="female">女聲</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Select
+                  value={typeFilter}
+                  onValueChange={(v) => setTypeFilter(v as "all" | "narrator" | "character")}
+                >
+                  <SelectTrigger className="w-[80px] h-8 text-xs">
+                    <SelectValue placeholder="類型" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">全部</SelectItem>
+                    <SelectItem value="narrator">旁白</SelectItem>
+                    <SelectItem value="character">角色</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            {filteredVoiceActors.length === 0 ? (
+              <p className="text-sm text-muted-foreground">暫無符合條件的配音員</p>
+            ) : (
+              <div className="grid gap-2">
+                {filteredVoiceActors.map((actor: VoiceActor) => {
+                  const ActorIcon = getVoiceActorIcon(actor);
+                  const isSelected = selectedVoiceActor === actor.id;
+                  return (
+                    <Card 
+                      key={actor.id}
+                      className={`cursor-pointer transition-all duration-200 ${
+                        isSelected 
+                          ? "border-primary border-2 bg-primary/5" 
+                          : "border-border hover:border-muted-foreground/50"
+                      }`}
+                      onClick={() => onVoiceActorChange(actor.id)}
+                    >
+                      <CardContent className="p-3">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3 flex-1">
+                            <ActorIcon className={`w-5 h-5 ${isSelected ? "text-primary" : "text-muted-foreground"}`} />
+                            <div className="flex-1">
+                              <div className="flex items-center gap-2">
+                                <span className="font-medium text-sm">{actor.name}</span>
+                                <Badge variant="outline" className="text-xs">
+                                  {actor.gender === "male" ? "男" : "女"}
+                                </Badge>
+                                <Badge variant="secondary" className="text-xs">
+                                  {actor.type === "narrator" ? "旁白" : "角色"}
+                                </Badge>
+                              </div>
+                              <p className="text-xs text-muted-foreground mt-1">{actor.description}</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {actor.sampleUrl && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className={`h-8 w-8 p-0 ${isPlaying === actor.id ? "text-primary bg-primary/10" : "text-muted-foreground hover:text-primary"}`}
+                                onClick={(e) => handlePlaySample(actor, e)}
+                              >
+                                {isPlaying === actor.id ? (
+                                  <Square className="w-4 h-4" />
+                                ) : (
+                                  <Play className="w-4 h-4" />
+                                )}
+                              </Button>
+                            )}
+                            {isSelected && (
+                              <Check className="w-5 h-5 text-primary" />
+                            )}
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 角色配音模式 - 角色分析和配音員分配 */}
+        {voiceMode === "character" && storyMode === "character" && (
+          <div className="space-y-4">
+            {/* 分析角色按鈕 */}
+            <div className="flex items-center gap-3">
+              <Button
+                variant="outline"
+                onClick={handleAnalyzeCharacters}
+                disabled={isAnalyzing || !story}
+                className="flex-1"
+              >
+                {isAnalyzing ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    分析中...
+                  </>
+                ) : (
+                  <>
+                    <Wand2 className="w-4 h-4 mr-2" />
+                    AI 分析角色
+                  </>
+                )}
+              </Button>
+              {analyzedCharacters.length > 0 && (
+                <Button
+                  variant="default"
+                  onClick={handleAutoAssign}
+                  disabled={autoAssign.isPending}
+                >
+                  {autoAssign.isPending ? (
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  ) : (
+                    <Users className="w-4 h-4 mr-2" />
+                  )}
+                  自動分配配音員
+                </Button>
+              )}
+            </div>
+
+            {/* 分析結果 - 角色列表 */}
+            {analyzedCharacters.length > 0 && (
+              <div className="space-y-3">
+                <Label>角色配音設定</Label>
+                <div className="space-y-2">
+                  {analyzedCharacters.map((character, index) => {
+                    const voiceConfig = characterVoices.find(
+                      v => v.characterName.toLowerCase() === character.name.toLowerCase()
+                    );
+                    const selectedActor = voiceActors.find((a: VoiceActor) => a.id === voiceConfig?.voiceActorId);
+                    
+                    return (
+                      <Card key={index} className="bg-background/30">
+                        <CardContent className="p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="font-medium">{character.name}</span>
+                                <Badge variant="outline" className="text-xs">
+                                  {character.gender === "male" ? "男" : character.gender === "female" ? "女" : "未知"}
+                                </Badge>
+                                {voiceConfig?.isAutoMatched && (
+                                  <Badge variant="secondary" className="text-xs">
+                                    AI 配對
+                                  </Badge>
+                                )}
+                              </div>
+                              <p className="text-xs text-muted-foreground truncate mt-1">
+                                {character.description}
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <Select
+                                value={voiceConfig?.voiceActorId || ""}
+                                onValueChange={(value) => updateCharacterVoice(character.name, value)}
+                              >
+                                <SelectTrigger className="w-[140px] bg-background/50">
+                                  <SelectValue placeholder="選擇配音員" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {voiceActors
+                                    .filter((a: VoiceActor) => a.type === "character")
+                                    .map((actor: VoiceActor) => (
+                                      <SelectItem key={actor.id} value={actor.id}>
+                                        {actor.name}
+                                      </SelectItem>
+                                    ))}
+                                </SelectContent>
+                              </Select>
+                              {voiceConfig && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={() => handleSaveBinding(voiceConfig)}
+                                  title="保存綁定（下次使用此角色時自動套用）"
+                                >
+                                  <Save className="w-4 h-4" />
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* 已保存的角色聲音綁定 */}
+            {savedVoices && savedVoices.length > 0 && (
+              <div className="space-y-3">
+                <Label className="flex items-center gap-2">
+                  <Users className="w-4 h-4" />
+                  已保存的角色聲音
+                </Label>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {savedVoices.map((binding: { id: number; characterName: string; voiceActorId: string }) => {
+                    const actor = voiceActors.find((a: VoiceActor) => a.id === binding.voiceActorId);
+                    return (
+                      <Card key={binding.id} className="bg-background/30">
+                        <CardContent className="p-2">
+                          <div className="flex items-center justify-between">
+                            <div className="min-w-0">
+                              <p className="font-medium text-sm truncate">{binding.characterName}</p>
+                              <p className="text-xs text-muted-foreground truncate">
+                                {actor?.name || binding.voiceActorId}
+                              </p>
+                            </div>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6"
+                              onClick={() => deleteCharacterVoice.mutate({ id: Number(binding.id) })}
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </Button>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 劇情模式提示 */}
+        {voiceMode === "character" && storyMode === "scene" && (
+          <div className="text-center py-4 text-muted-foreground">
+            <p className="text-sm">劇情模式下建議使用「統一配音」或「場景配音」</p>
+            <p className="text-xs mt-1">角色配音模式更適合固定人物模式的故事</p>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+export default VoiceSelector;
